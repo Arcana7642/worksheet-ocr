@@ -91,7 +91,7 @@ final class CropPreview extends ImageView {
                         Math.max(startX, x), Math.max(startY, y));
                 if (event.getActionMasked() == MotionEvent.ACTION_UP) {
                     getParent().requestDisallowInterceptTouchEvent(false);
-                    float minSize = 12 * getResources().getDisplayMetrics().density;
+                    float minSize = 6 * getResources().getDisplayMetrics().density;
                     if (selection.width() * photoBounds.width() < minSize
                             || selection.height() * photoBounds.height() < minSize) {
                         clearSelection();

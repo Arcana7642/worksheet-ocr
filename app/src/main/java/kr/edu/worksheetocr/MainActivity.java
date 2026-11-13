@@ -7,6 +7,7 @@ import android.content.ClipboardManager;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.ImageDecoder;
+import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Bundle;
@@ -16,6 +17,7 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -46,6 +48,9 @@ public final class MainActivity extends Activity {
     private Bitmap photo;
     private Button scanSelection;
     private Button scanFull;
+    private Button rotateLeft;
+    private Button rotateRight;
+    private CheckBox appendReading;
     private TextView cropHint;
     private EditText answer;
     private TextView status;
@@ -94,6 +99,15 @@ public final class MainActivity extends Activity {
         cropHint.setText("손글씨 한 줄을 여유 있게 드래그한 뒤 손글씨 읽기를 누르세요.");
         cropHint.setVisibility(View.GONE);
         page.addView(cropHint);
+        LinearLayout rotation = new LinearLayout(this);
+        page.addView(rotation);
+        rotateLeft = button("왼쪽 90°", () -> rotatePhoto(-90));
+        rotateRight = button("오른쪽 90°", () -> rotatePhoto(90));
+        rotateLeft.setVisibility(View.GONE);
+        rotateRight.setVisibility(View.GONE);
+        rotation.addView(rotateLeft, new LinearLayout.LayoutParams(0, dp(48), 1));
+        rotation.addView(rotateRight, new LinearLayout.LayoutParams(0, dp(48), 1));
+
         LinearLayout scanActions = new LinearLayout(this);
         page.addView(scanActions);
         scanSelection = button("손글씨 읽기", () -> scanPhoto(true));
@@ -103,6 +117,11 @@ public final class MainActivity extends Activity {
         scanActions.addView(scanSelection, new LinearLayout.LayoutParams(0, dp(52), 1));
         scanActions.addView(scanFull, new LinearLayout.LayoutParams(0, dp(52), 1));
         preview.setOnSelectionChanged(() -> scanSelection.setEnabled(preview.isEnabled() && preview.hasSelection()));
+
+        appendReading = new CheckBox(this);
+        appendReading.setText("이전 결과에 이어 붙이기");
+        appendReading.setVisibility(View.GONE);
+        page.addView(appendReading);
 
         TextView label = new TextView(this);
         label.setText("인식 결과");
@@ -197,6 +216,10 @@ public final class MainActivity extends Activity {
                     preview.setImageBitmap(bitmap);
                     preview.setVisibility(View.VISIBLE);
                     cropHint.setVisibility(View.VISIBLE);
+                    appendReading.setVisibility(View.VISIBLE);
+                    appendReading.setChecked(false);
+                    rotateLeft.setVisibility(View.VISIBLE);
+                    rotateRight.setVisibility(View.VISIBLE);
                     scanSelection.setVisibility(View.VISIBLE);
                     scanFull.setVisibility(View.VISIBLE);
                     answer.setText("");
@@ -206,6 +229,30 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> showFailure("사진을 읽을 수 없어요. 다른 사진으로 다시 시도해 주세요."));
             } finally {
                 if (temporaryPhoto != null) temporaryPhoto.delete();
+            }
+        });
+    }
+
+    private void rotatePhoto(int degrees) {
+        if (photo == null) return;
+        Bitmap source = photo;
+        setBusy(true);
+        decoder.execute(() -> {
+            try {
+                Matrix matrix = new Matrix();
+                matrix.setRotate(degrees);
+                Bitmap rotated = Bitmap.createBitmap(source, 0, 0,
+                        source.getWidth(), source.getHeight(), matrix, true);
+                runOnUiThread(() -> {
+                    if (isDestroyed() || isFinishing()) return;
+                    photo = rotated;
+                    preview.clearSelection();
+                    preview.setImageBitmap(rotated);
+                    setBusy(false);
+                    status.setText("회전했어요. 읽을 손글씨 한 줄을 선택하세요.");
+                });
+            } catch (RuntimeException error) {
+                runOnUiThread(() -> showFailure("사진을 회전할 수 없어요."));
             }
         });
     }
@@ -228,8 +275,8 @@ public final class MainActivity extends Activity {
                     });
                 } else {
                     if (handwriting == null) handwriting = new HandwritingRecognizer(getAssets());
-                    String text = handwriting.readLine(input);
-                    runOnUiThread(() -> showResult(text, started));
+                    java.util.List<String> readings = handwriting.readVariants(input);
+                    runOnUiThread(() -> showReadings(readings, started));
                 }
             } catch (IOException | ai.onnxruntime.OrtException | RuntimeException error) {
                 runOnUiThread(() -> showFailure("선택 영역을 읽을 수 없어요. 다시 선택해 주세요."));
@@ -241,6 +288,20 @@ public final class MainActivity extends Activity {
         recognizer.process(InputImage.fromBitmap(bitmap, 0))
                 .addOnSuccessListener(result -> showResult(result.getText().trim(), started))
                 .addOnFailureListener(error -> showFailure("글자를 읽지 못했어요. 다시 시도해 주세요."));
+    }
+
+    private void showReadings(java.util.List<String> readings, long started) {
+        if (isDestroyed() || isFinishing()) return;
+        String existing = appendReading.isChecked() ? answer.getText().toString().trim() : "";
+        String prefix = existing.isEmpty() ? "" : existing + " ";
+        showResult(readings.isEmpty() ? "" : prefix + readings.get(0), started);
+        if (readings.size() > 1) {
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("사진과 일치하는 결과를 선택하세요")
+                    .setItems(readings.toArray(new String[0]), (dialog, index) -> answer.setText(prefix + readings.get(index)))
+                    .setNegativeButton("닫기", null)
+                    .show();
+        }
     }
 
     private void showResult(String text, long started) {
@@ -270,6 +331,9 @@ public final class MainActivity extends Activity {
         preview.setEnabled(!busy);
         scanSelection.setEnabled(!busy && preview.hasSelection());
         scanFull.setEnabled(!busy && photo != null);
+        rotateLeft.setEnabled(!busy && photo != null);
+        rotateRight.setEnabled(!busy && photo != null);
+        appendReading.setEnabled(!busy);
     }
 
     private void copyAnswer() {

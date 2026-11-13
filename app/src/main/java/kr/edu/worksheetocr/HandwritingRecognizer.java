@@ -2,6 +2,10 @@ package kr.edu.worksheetocr;
 
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Matrix;
+import android.graphics.Paint;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -44,9 +48,59 @@ final class HandwritingRecognizer {
         }
     }
 
-    String readLine(Bitmap image) throws OrtException {
-        int width = Math.max(8, (int) Math.ceil((double) HEIGHT * image.getWidth() / image.getHeight()));
-        if (width > MAX_WIDTH) throw new IllegalArgumentException("Selected line is too wide");
+    List<String> readVariants(Bitmap image) throws OrtException {
+        double scale = Math.min(1.0, 2560.0 / Math.max(image.getWidth(), image.getHeight()));
+        Bitmap source = Bitmap.createScaledBitmap(image,
+                Math.max(1, (int) Math.round(image.getWidth() * scale)),
+                Math.max(1, (int) Math.round(image.getHeight() * scale)), true);
+        Bitmap contrast = PencilContrast.enhance(source, 6);
+        Bitmap leveled = transform(source, -2, 0);
+        Bitmap strongContrast = PencilContrast.enhance(leveled, 10);
+        Bitmap straightened = transform(source, 3, -0.12f);
+        java.util.Set<String> results = new java.util.LinkedHashSet<>();
+        try {
+            results.add(readLine(contrast, 1.0));
+            results.add(readLine(source, 1.0));
+            results.add(readLine(strongContrast, 1.0));
+            results.add(readLine(straightened, 0.8));
+            results.add(readLine(contrast, 0.82));
+            results.add(readLine(contrast, 1.18));
+            results.add(readLine(source, 0.82));
+            results.remove("");
+            return new ArrayList<>(results);
+        } finally {
+            contrast.recycle();
+            strongContrast.recycle();
+            straightened.recycle();
+            leveled.recycle();
+            if (source != image) source.recycle();
+        }
+    }
+
+    private static Bitmap transform(Bitmap source, double angle, float shear) {
+        int width = source.getWidth();
+        int height = source.getHeight();
+        float centerX = width / 2f;
+        float centerY = height / 2f;
+        float cosine = (float) Math.cos(Math.toRadians(angle));
+        float sine = (float) Math.sin(Math.toRadians(angle));
+        float slope = -sine + shear;
+        Matrix matrix = new Matrix();
+        matrix.setValues(new float[] {
+                cosine, slope, centerX - cosine * centerX - slope * centerY,
+                sine, cosine, centerY - sine * centerX - cosine * centerY,
+                0, 0, 1
+        });
+        Bitmap output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(output);
+        canvas.drawColor(Color.WHITE);
+        canvas.drawBitmap(source, matrix, new Paint(Paint.FILTER_BITMAP_FLAG));
+        return output;
+    }
+
+    private String readLine(Bitmap image, double widthScale) throws OrtException {
+        int width = Math.max(8, (int) Math.ceil(widthScale * HEIGHT * image.getWidth() / image.getHeight()));
+        if (width > MAX_WIDTH) return "";
         Bitmap resized = Bitmap.createScaledBitmap(image, width, HEIGHT, true);
         int plane = HEIGHT * width;
         int[] pixels = new int[plane];
