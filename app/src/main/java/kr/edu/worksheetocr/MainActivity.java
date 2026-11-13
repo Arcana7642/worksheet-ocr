@@ -7,6 +7,7 @@ import android.content.ClipboardManager;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.ImageDecoder;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.SystemClock;
@@ -16,7 +17,6 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -37,11 +37,16 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final int CAPTURE = 1;
     private static final int PICK = 2;
-    private static final int MAX_IMAGE_EDGE = 2560;
+    private static final int MAX_IMAGE_EDGE = 4096;
 
     private final ExecutorService decoder = Executors.newSingleThreadExecutor();
     private TextRecognizer recognizer;
-    private ImageView preview;
+    private HandwritingRecognizer handwriting;
+    private CropPreview preview;
+    private Bitmap photo;
+    private Button scanSelection;
+    private Button scanFull;
+    private TextView cropHint;
     private EditText answer;
     private TextView status;
     private Button capture;
@@ -81,11 +86,23 @@ public final class MainActivity extends Activity {
         status.setPadding(0, dp(8), 0, dp(8));
         page.addView(status);
 
-        preview = new ImageView(this);
-        preview.setContentDescription("선택한 활동지 사진");
-        preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        preview = new CropPreview(this);
+        preview.setContentDescription("선택한 활동지 사진. 읽을 영역을 드래그하여 선택하세요.");
         preview.setVisibility(View.GONE);
-        page.addView(preview, new LinearLayout.LayoutParams(-1, dp(240)));
+        page.addView(preview, new LinearLayout.LayoutParams(-1, dp(320)));
+        cropHint = new TextView(this);
+        cropHint.setText("손글씨 한 줄을 여유 있게 드래그한 뒤 손글씨 읽기를 누르세요.");
+        cropHint.setVisibility(View.GONE);
+        page.addView(cropHint);
+        LinearLayout scanActions = new LinearLayout(this);
+        page.addView(scanActions);
+        scanSelection = button("손글씨 읽기", () -> scanPhoto(true));
+        scanFull = button("전체 읽기", () -> scanPhoto(false));
+        scanSelection.setVisibility(View.GONE);
+        scanFull.setVisibility(View.GONE);
+        scanActions.addView(scanSelection, new LinearLayout.LayoutParams(0, dp(52), 1));
+        scanActions.addView(scanFull, new LinearLayout.LayoutParams(0, dp(52), 1));
+        preview.setOnSelectionChanged(() -> scanSelection.setEnabled(preview.isEnabled() && preview.hasSelection()));
 
         TextView label = new TextView(this);
         label.setText("인식 결과");
@@ -174,7 +191,16 @@ public final class MainActivity extends Activity {
                             }
                         });
                 runOnUiThread(() -> {
-                    if (!isDestroyed() && !isFinishing()) recognize(bitmap, started);
+                    if (isDestroyed() || isFinishing()) return;
+                    photo = bitmap;
+                    preview.clearSelection();
+                    preview.setImageBitmap(bitmap);
+                    preview.setVisibility(View.VISIBLE);
+                    cropHint.setVisibility(View.VISIBLE);
+                    scanSelection.setVisibility(View.VISIBLE);
+                    scanFull.setVisibility(View.VISIBLE);
+                    answer.setText("");
+                    recognize(bitmap, started);
                 });
             } catch (IOException | RuntimeException error) {
                 runOnUiThread(() -> showFailure("사진을 읽을 수 없어요. 다른 사진으로 다시 시도해 주세요."));
@@ -184,24 +210,50 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void scanPhoto(boolean selectedOnly) {
+        if (photo == null || (selectedOnly && !preview.hasSelection())) return;
+        Rect area = selectedOnly ? preview.selectedPixels(photo.getWidth(), photo.getHeight()) : null;
+        if (area == null) preview.clearSelection();
+        setBusy(true);
+        status.setText("사진에서 글자를 읽는 중…");
+        long started = SystemClock.elapsedRealtime();
+        Bitmap source = photo;
+        decoder.execute(() -> {
+            try {
+                Bitmap input = area == null ? source : Bitmap.createBitmap(
+                        source, area.left, area.top, area.width(), area.height());
+                if (area == null) {
+                    runOnUiThread(() -> {
+                        if (!isDestroyed() && !isFinishing()) recognize(input, started);
+                    });
+                } else {
+                    if (handwriting == null) handwriting = new HandwritingRecognizer(getAssets());
+                    String text = handwriting.readLine(input);
+                    runOnUiThread(() -> showResult(text, started));
+                }
+            } catch (IOException | ai.onnxruntime.OrtException | RuntimeException error) {
+                runOnUiThread(() -> showFailure("선택 영역을 읽을 수 없어요. 다시 선택해 주세요."));
+            }
+        });
+    }
+
     private void recognize(Bitmap bitmap, long started) {
         recognizer.process(InputImage.fromBitmap(bitmap, 0))
-                .addOnSuccessListener(result -> {
-                    if (isDestroyed() || isFinishing()) return;
-                    setBusy(false);
-                    preview.setImageBitmap(bitmap);
-                    preview.setVisibility(View.VISIBLE);
-                    String text = result.getText().trim();
-                    answer.setText(text);
-                    if (text.isEmpty()) {
-                        status.setText("읽은 글자가 없어요. 활동지에 가까이 대고 다시 찍어 보세요.");
-                    } else {
-                        double seconds = (SystemClock.elapsedRealtime() - started) / 1000.0;
-                        status.setText(String.format(java.util.Locale.KOREA,
-                                "인식 완료 · %.1f초. 사진과 비교해 답안을 확인하세요.", seconds));
-                    }
-                })
+                .addOnSuccessListener(result -> showResult(result.getText().trim(), started))
                 .addOnFailureListener(error -> showFailure("글자를 읽지 못했어요. 다시 시도해 주세요."));
+    }
+
+    private void showResult(String text, long started) {
+        if (isDestroyed() || isFinishing()) return;
+        setBusy(false);
+        if (text.isEmpty()) {
+            status.setText("읽은 글자가 없어요. 글씨가 선명한 사진으로 다시 시도해 주세요.");
+            return;
+        }
+        answer.setText(text);
+        double seconds = (SystemClock.elapsedRealtime() - started) / 1000.0;
+        status.setText(String.format(java.util.Locale.KOREA,
+                "인식 완료 · %.1f초. 사진과 비교해 답안을 확인하세요.", seconds));
     }
 
     private void showFailure(String message) {
@@ -215,6 +267,9 @@ public final class MainActivity extends Activity {
         pick.setEnabled(!busy);
         answer.setEnabled(!busy);
         copy.setEnabled(!busy);
+        preview.setEnabled(!busy);
+        scanSelection.setEnabled(!busy && preview.hasSelection());
+        scanFull.setEnabled(!busy && photo != null);
     }
 
     private void copyAnswer() {
@@ -258,6 +313,9 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (isFinishing()) deleteCapture();
+        decoder.execute(() -> {
+            if (handwriting != null) handwriting.close();
+        });
         decoder.shutdown();
         recognizer.close();
         super.onDestroy();
